@@ -74,6 +74,19 @@
     font-family: 'Inter', -apple-system, system-ui, sans-serif;
     -webkit-tap-highlight-color: transparent;
   }
+
+  .cloud-status {
+    margin: 8px 16px 0;
+    padding: 7px 10px;
+    border-radius: 10px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-align: center;
+    background: var(--surface-2);
+    color: var(--ink-muted);
+  }
+  .cloud-status.ok { color: var(--accent); }
+  .cloud-status.warn { color: var(--pop); }
   #app { max-width: 560px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column; }
 
   header.topbar {
@@ -408,6 +421,7 @@
     <div class="brand-mark" id="brandMark">📦</div>
     <h1 id="pageTitle">Proveedores</h1>
   </header>
+  <div id="cloudStatus" class="cloud-status warn">☁️ Preparando nube…</div>
 
   <main id="mainArea">
     <!-- VISTA: LISTA DE PROVEEDORES -->
@@ -481,12 +495,25 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+
 (function() {
   "use strict";
 
+  // ===== NUBE (Supabase) =====
+  // Pega aquí los datos de tu proyecto Supabase.
+  // IMPORTANTE: usa solamente la clave "anon/public", NUNCA la service_role.
+  var SUPABASE_URL = "https://rdieupeeukqtxhverwgc.supabase.co";
+  var SUPABASE_ANON_KEY = "sb_publishable_i2tmGG8o6tic_KUZsQDFCw_MnrTevM7";
+  var CLOUD_TABLE = "app_state";
+  var CLOUD_ROW_ID = 1;
+
   var STORAGE_KEY = "pedidos_proveedores_v2";
   var OLD_STORAGE_KEY = "pedidos_proveedores_v1";
+  var supabaseClient = null;
+  var cloudReady = false;
+  var cloudBusy = false;
 
   function normalizeSupplier(s) {
     return {
@@ -515,42 +542,161 @@
           products: oldProducts.map(function(p) { return { id: p.id, name: p.name }; })
         });
       });
-      return { suppliers: suppliers, orders: (old.orders && typeof old.orders === "object") ? old.orders : {} };
+      return {
+        suppliers: suppliers,
+        orders: (old.orders && typeof old.orders === "object") ? old.orders : {}
+      };
     } catch (e) {
       console.error("Error migrando datos v1:", e);
       return null;
     }
   }
 
-  function loadData() {
+  function loadLocalData() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         var parsed = JSON.parse(raw);
-        var suppliers = (Array.isArray(parsed.suppliers) ? parsed.suppliers : []).map(normalizeSupplier);
-        return { suppliers: suppliers, orders: (parsed.orders && typeof parsed.orders === "object") ? parsed.orders : {} };
+        return {
+          suppliers: (Array.isArray(parsed.suppliers) ? parsed.suppliers : []).map(normalizeSupplier),
+          orders: (parsed.orders && typeof parsed.orders === "object") ? parsed.orders : {}
+        };
       }
       var migrated = migrateFromV1();
       if (migrated) return migrated;
-      return { suppliers: [], orders: {} };
     } catch (e) {
       console.error("No se pudo leer el almacenamiento local:", e);
-      return { suppliers: [], orders: {} };
+    }
+    return { suppliers: [], orders: {} };
+  }
+
+  // Los pedidos en curso se quedan en ESTE dispositivo.
+  // Proveedores/productos se sincronizan en la nube.
+  var localData = loadLocalData();
+  var data = {
+    suppliers: localData.suppliers,
+    orders: localData.orders
+  };
+
+  function saveLocalOrders() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        suppliers: data.suppliers,
+        orders: data.orders
+      }));
+    } catch (e) {
+      console.error("No se pudo guardar el pedido local:", e);
+    }
+  }
+
+  function isCloudConfigured() {
+    return SUPABASE_URL.indexOf("PEGA_AQUI") !== 0 &&
+           SUPABASE_ANON_KEY.indexOf("PEGA_AQUI") !== 0 &&
+           window.supabase && window.supabase.createClient;
+  }
+
+  function setCloudStatus(text, ok) {
+    var el = document.getElementById("cloudStatus");
+    if (!el) return;
+    el.textContent = text;
+    el.className = "cloud-status " + (ok ? "ok" : "warn");
+  }
+
+  async function cloudLoad() {
+    if (!cloudReady || !supabaseClient) return null;
+    var result = await supabaseClient
+      .from(CLOUD_TABLE)
+      .select("data")
+      .eq("id", CLOUD_ROW_ID)
+      .maybeSingle();
+    if (result.error) throw result.error;
+    return result.data ? result.data.data : null;
+  }
+
+  async function cloudSave() {
+    if (!cloudReady || !supabaseClient || cloudBusy) return true;
+    cloudBusy = true;
+    try {
+      var payload = {
+        id: CLOUD_ROW_ID,
+        data: { suppliers: data.suppliers },
+        updated_at: new Date().toISOString()
+      };
+      var result = await supabaseClient
+        .from(CLOUD_TABLE)
+        .upsert(payload, { onConflict: "id" });
+      if (result.error) throw result.error;
+      setCloudStatus("☁️ Sincronizado", true);
+      return true;
+    } catch (e) {
+      console.error("Error guardando en la nube:", e);
+      setCloudStatus("⚠️ Sin conexión", false);
+      showAlert("No se pudo guardar en la nube. Revisá la conexión a Internet y la configuración de Supabase.");
+      return false;
+    } finally {
+      cloudBusy = false;
     }
   }
 
   function saveData() {
+    saveLocalOrders();
+    cloudSave();
+    return true;
+  }
+
+  async function initCloud() {
+    if (!isCloudConfigured()) {
+      setCloudStatus("📱 Solo este dispositivo", false);
+      return;
+    }
+
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-      return true;
+      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      cloudReady = true;
+      setCloudStatus("☁️ Conectando…", true);
+
+      var remote = await cloudLoad();
+
+      if (remote && Array.isArray(remote.suppliers)) {
+        data.suppliers = remote.suppliers.map(normalizeSupplier);
+        saveLocalOrders();
+        setCloudStatus("☁️ Sincronizado", true);
+      } else if (data.suppliers.length > 0) {
+        // Primera instalación: si ya había datos locales, los subimos una sola vez.
+        await cloudSave();
+      } else {
+        // Crea la fila inicial.
+        await cloudSave();
+      }
+
+      render();
     } catch (e) {
-      console.error("No se pudo guardar:", e);
-      showAlert("No se pudo guardar el cambio. El almacenamiento del navegador podría estar lleno (puede pasar si hay muchos logos con imágenes pesadas).");
-      return false;
+      console.error("No se pudo conectar con Supabase:", e);
+      cloudReady = false;
+      setCloudStatus("⚠️ Error de nube", false);
+      showAlert("La web abrió correctamente, pero no pudo conectarse con la base de datos. Revisá URL, clave y políticas de Supabase.");
     }
   }
 
-  var data = loadData();
+  async function refreshCloud() {
+    if (!cloudReady || !supabaseClient || cloudBusy) return;
+    try {
+      var remote = await cloudLoad();
+      if (!remote || !Array.isArray(remote.suppliers)) return;
+      data.suppliers = remote.suppliers.map(normalizeSupplier);
+      saveLocalOrders();
+      if (state.view === "suppliers") renderSuppliers();
+      else if (state.view === "order") {
+        if (!getActiveSupplier()) setView("suppliers");
+        else renderOrder();
+      }
+      setCloudStatus("☁️ Sincronizado", true);
+    } catch (e) {
+      console.error("Error actualizando nube:", e);
+      setCloudStatus("⚠️ Sin conexión", false);
+    }
+  }
+
   var state = {
     view: "suppliers",
     activeSupplierId: null,
@@ -904,7 +1050,7 @@
     } else {
       delete data.orders[supplier.id][productId];
     }
-    saveData();
+    saveLocalOrders();
     renderOrder();
   }
 
@@ -948,7 +1094,7 @@
       danger: true,
       onConfirm: function() {
         data.orders[supplier.id] = {};
-        saveData();
+        saveLocalOrders();
         renderOrder();
       }
     });
@@ -960,9 +1106,6 @@
     var lines = items.map(function(p) {
       return "• " + order[p.id] + " " + p.name;
     });
-    lines.push("");
-    lines.push("Total de productos: " + items.length);
-
     var text = lines.join("\n");
     var encoded = encodeURIComponent(text);
     var phone = (supplier.phone || "").replace(/[^0-9]/g, "");
@@ -1144,7 +1287,9 @@
   }
 
   render();
+  initCloud();
 })();
+
 </script>
 </body>
 </html>
