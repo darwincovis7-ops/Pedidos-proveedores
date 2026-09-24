@@ -1180,7 +1180,7 @@
     var withQty = supplier.products.filter(function(p) { return (order[p.id] || 0) > 0; });
 
     if (withQty.length === 0) {
-      showAlert("Agregá al menos una cantidad antes de compartir el pedido.");
+      showAlert("Agrega al menos una cantidad antes de compartir el pedido.");
       return;
     }
 
@@ -1217,7 +1217,7 @@
     if (!file) return;
 
     if (!window.XLSX) {
-      showAlert("No se pudo cargar el lector de Excel. Revisá tu conexión a Internet e intentá de nuevo.");
+      showAlert("No se pudo cargar el lector de Excel. Revisa tu conexión a Internet e intenta de nuevo.");
       return;
     }
 
@@ -1305,7 +1305,7 @@
     if (current.length) blocks.push(current);
 
     if (!blocks.length) {
-      showAlert("El Excel está vacío. Colocá un proveedor y debajo sus productos.");
+      showAlert("El Excel está vacío. Agrega un proveedor y debajo sus productos.");
       return;
     }
 
@@ -1430,7 +1430,7 @@
         }
       };
       img.onerror = function() {
-        showAlert("No se pudo leer esa imagen. Probá con otra.");
+        showAlert("No se pudo leer esa imagen. Elige otra.");
       };
       img.src = e.target.result;
     };
@@ -1467,7 +1467,7 @@
     var name = document.getElementById("supplierNameInput").value.trim();
     var phone = document.getElementById("supplierPhoneInput").value.trim();
     if (!name) {
-      showAlert("Ingresá un nombre para el proveedor.");
+      showAlert("Ingresa un nombre para el proveedor.");
       return;
     }
     if (state.editingSupplierId) {
